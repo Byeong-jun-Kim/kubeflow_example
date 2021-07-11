@@ -1,0 +1,75 @@
+apiVersion: "kubeflow.org/v1beta1"
+kind: Experiment
+metadata:
+  namespace: kubeflow-user-example-com
+  name: fmnist-katib
+spec:
+  objective:
+    type: maximize
+    goal: 0.99
+    objectiveMetricName: Validation-accuracy
+    additionalMetricNames:
+      - Train-accuracy
+  algorithm:
+    algorithmName: random
+  parallelTrialCount: 2
+  maxTrialCount: 50
+  maxFailedTrialCount: 3
+  parameters:
+    - name: lr
+      parameterType: double
+      feasibleSpace:
+        min: "0.001"
+        max: "0.01"
+    - name: num-layers
+      parameterType: int
+      feasibleSpace:
+        min: "2"
+        max: "5"
+    - name: act-function
+      parameterType: categorical
+      feasibleSpace:
+        list:
+          - relu
+          - sigmoid
+          - tanh
+    - name: dropout
+      parameterType: double
+      feasibleSpace:
+        min: "0.1"
+        max: "0.9"
+  trialTemplate:
+    primaryContainerName: training-container
+    trialParameters:
+      - name: learningRate
+        description: Learning rate for the training model
+        reference: lr
+      - name: numberLayers
+        description: Number of training model layers
+        reference: num-layers
+      - name: activationFunction
+        description: Activation Function
+        reference: act-function
+      - name: dropoutRate
+        description: Dropout Rate
+        reference: dropout
+    trialSpec:
+      apiVersion: batch/v1
+      kind: Job
+      spec:
+        template:
+          metadata:
+            annotations:
+              sidecar.istio.io/inject: "false"
+          spec:
+            containers:
+              - name: training-container
+                image: kubeflow-registry.default.svc.cluster.local:30000/katib-job:3F6886A4
+                command:
+                  - python
+                  - /app/fmnist-save-model.py
+                  - --learning_rate=${trialParameters.learningRate}
+                  - --layer=${trialParameters.numberLayers}
+                  - --act=${trialParameters.activationFunction}
+                  - --dropout_rate=${trialParameters.dropoutRate}
+            restartPolicy: Never
