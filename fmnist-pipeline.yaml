@@ -1,0 +1,190 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: fmnistpipeline-
+  annotations: {pipelines.kubeflow.org/kfp_sdk_version: 1.6.4, pipelines.kubeflow.org/pipeline_compilation_time: '2021-07-13T12:32:13.305398',
+    pipelines.kubeflow.org/pipeline_spec: '{"description": "mnist", "inputs": [{"name":
+      "learning_rate"}, {"name": "dropout_rate"}, {"name": "epoch"}, {"name": "act"},
+      {"name": "layer"}, {"name": "checkpoint_dir"}, {"name": "saved_model_dir"},
+      {"name": "pvc_name"}, {"name": "tensorboard_log"}, {"name": "name"}, {"name":
+      "model_version"}, {"name": "namespace"}], "name": "FMnistPipeline"}'}
+  labels: {pipelines.kubeflow.org/kfp_sdk_version: 1.6.4}
+spec:
+  entrypoint: fmnistpipeline
+  templates:
+  - name: fmnist
+    container:
+      args: [--learning_rate, '{{inputs.parameters.learning_rate}}', --dropout_rate,
+        '{{inputs.parameters.dropout_rate}}', --epoch, '{{inputs.parameters.epoch}}',
+        --act, '{{inputs.parameters.act}}', --layer, '{{inputs.parameters.layer}}',
+        --checkpoint_dir, '{{inputs.parameters.checkpoint_dir}}', --saved_model_dir,
+        '{{inputs.parameters.saved_model_dir}}', --model_version, '{{inputs.parameters.model_version}}',
+        --tensorboard_log, '{{inputs.parameters.tensorboard_log}}']
+      command: [python, /app/fmnist-save-model.py]
+      image: kubeflow-registry.default.svc.cluster.local:30000/katib-job:3F6886A4
+      volumeMounts:
+      - {mountPath: /pv, name: pvolume-e819e39f92a888af338a32082ea85feaa488e4a0aabfacc858d718b}
+    inputs:
+      parameters:
+      - {name: act}
+      - {name: checkpoint_dir}
+      - {name: dropout_rate}
+      - {name: epoch}
+      - {name: layer}
+      - {name: learning_rate}
+      - {name: model_version}
+      - {name: pvc_name}
+      - {name: saved_model_dir}
+      - {name: tensorboard_log}
+    metadata:
+      labels: {pipelines.kubeflow.org/kfp_sdk_version: 1.6.4, pipelines.kubeflow.org/pipeline-sdk-type: kfp}
+    volumes:
+    - name: pvolume-e819e39f92a888af338a32082ea85feaa488e4a0aabfacc858d718b
+      persistentVolumeClaim: {claimName: '{{inputs.parameters.pvc_name}}'}
+  - name: fmnistpipeline
+    inputs:
+      parameters:
+      - {name: act}
+      - {name: checkpoint_dir}
+      - {name: dropout_rate}
+      - {name: epoch}
+      - {name: layer}
+      - {name: learning_rate}
+      - {name: model_version}
+      - {name: name}
+      - {name: namespace}
+      - {name: pvc_name}
+      - {name: saved_model_dir}
+      - {name: tensorboard_log}
+    dag:
+      tasks:
+      - name: fmnist
+        template: fmnist
+        arguments:
+          parameters:
+          - {name: act, value: '{{inputs.parameters.act}}'}
+          - {name: checkpoint_dir, value: '{{inputs.parameters.checkpoint_dir}}'}
+          - {name: dropout_rate, value: '{{inputs.parameters.dropout_rate}}'}
+          - {name: epoch, value: '{{inputs.parameters.epoch}}'}
+          - {name: layer, value: '{{inputs.parameters.layer}}'}
+          - {name: learning_rate, value: '{{inputs.parameters.learning_rate}}'}
+          - {name: model_version, value: '{{inputs.parameters.model_version}}'}
+          - {name: pvc_name, value: '{{inputs.parameters.pvc_name}}'}
+          - {name: saved_model_dir, value: '{{inputs.parameters.saved_model_dir}}'}
+          - {name: tensorboard_log, value: '{{inputs.parameters.tensorboard_log}}'}
+      - name: kfserving
+        template: kfserving
+        dependencies: [fmnist]
+        arguments:
+          parameters:
+          - {name: name, value: '{{inputs.parameters.name}}'}
+          - {name: namespace, value: '{{inputs.parameters.namespace}}'}
+          - {name: pvc_name, value: '{{inputs.parameters.pvc_name}}'}
+  - name: kfserving
+    container:
+      args: [--namespace, '{{inputs.parameters.namespace}}', --storage-uri, 'pvc://{{inputs.parameters.pvc_name}}/saved_model',
+        --serving-name, '{{inputs.parameters.name}}']
+      command:
+      - sh
+      - -c
+      - (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location
+        'kubernetes' 'kfserving' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip
+        install --quiet --no-warn-script-location 'kubernetes' 'kfserving' --user)
+        && "$0" "$@"
+      - sh
+      - -ec
+      - |
+        program_path=$(mktemp)
+        printf "%s" "$0" > "$program_path"
+        python3 -u "$program_path" "$@"
+      - |
+        def kfserving(namespace, storage_uri, serving_name):
+            from kfserving import KFServingClient, constants, utils
+            from kfserving import V1beta1InferenceService, V1beta1InferenceServiceSpec
+            from kfserving import V1beta1PredictorSpec, V1beta1TFServingSpec
+            from kubernetes.client import V1ObjectMeta, V1ResourceRequirements
+            import time
+
+            isvc = V1beta1InferenceService(
+                api_version=constants.KFSERVING_V1BETA1,
+                kind=constants.KFSERVING_KIND,
+                metadata=V1ObjectMeta(
+                    name=serving_name,
+                    namespace=namespace,
+                    annotations={"sidecar.istio.io/inject": "false"}
+                ),
+                spec=V1beta1InferenceServiceSpec(
+                    predictor=V1beta1PredictorSpec(
+                        tensorflow=V1beta1TFServingSpec(
+                            storage_uri=storage_uri,
+                            resources=V1ResourceRequirements(
+                                requests={'cpu':'100m','memory':'1Gi'},
+                                limits={'cpu':'100m', 'memory':'1Gi'}
+                            )
+                        )
+                    )
+                )
+            )
+
+            KFServing = KFServingClient()
+            KFServing.create(isvc)
+            time.sleep(5)
+            KFServing.get(serving_name, namespace=namespace, watch=True, timeout_seconds=300)
+
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Kfserving', description='')
+        _parser.add_argument("--namespace", dest="namespace", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--storage-uri", dest="storage_uri", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--serving-name", dest="serving_name", type=str, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+
+        _outputs = kfserving(**_parsed_args)
+      image: python:3.8-slim
+    inputs:
+      parameters:
+      - {name: name}
+      - {name: namespace}
+      - {name: pvc_name}
+    metadata:
+      labels: {pipelines.kubeflow.org/kfp_sdk_version: 1.6.4, pipelines.kubeflow.org/pipeline-sdk-type: kfp}
+      annotations: {pipelines.kubeflow.org/component_spec: '{"implementation": {"container":
+          {"args": ["--namespace", {"inputValue": "namespace"}, "--storage-uri", {"inputValue":
+          "storage_uri"}, "--serving-name", {"inputValue": "serving_name"}], "command":
+          ["sh", "-c", "(PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet
+          --no-warn-script-location ''kubernetes'' ''kfserving'' || PIP_DISABLE_PIP_VERSION_CHECK=1
+          python3 -m pip install --quiet --no-warn-script-location ''kubernetes''
+          ''kfserving'' --user) && \"$0\" \"$@\"", "sh", "-ec", "program_path=$(mktemp)\nprintf
+          \"%s\" \"$0\" > \"$program_path\"\npython3 -u \"$program_path\" \"$@\"\n",
+          "def kfserving(namespace, storage_uri, serving_name):\n    from kfserving
+          import KFServingClient, constants, utils\n    from kfserving import V1beta1InferenceService,
+          V1beta1InferenceServiceSpec\n    from kfserving import V1beta1PredictorSpec,
+          V1beta1TFServingSpec\n    from kubernetes.client import V1ObjectMeta, V1ResourceRequirements\n    import
+          time\n\n    isvc = V1beta1InferenceService(\n        api_version=constants.KFSERVING_V1BETA1,\n        kind=constants.KFSERVING_KIND,\n        metadata=V1ObjectMeta(\n            name=serving_name,\n            namespace=namespace,\n            annotations={\"sidecar.istio.io/inject\":
+          \"false\"}\n        ),\n        spec=V1beta1InferenceServiceSpec(\n            predictor=V1beta1PredictorSpec(\n                tensorflow=V1beta1TFServingSpec(\n                    storage_uri=storage_uri,\n                    resources=V1ResourceRequirements(\n                        requests={''cpu'':''100m'',''memory'':''1Gi''},\n                        limits={''cpu'':''100m'',
+          ''memory'':''1Gi''}\n                    )\n                )\n            )\n        )\n    )\n\n    KFServing
+          = KFServingClient()\n    KFServing.create(isvc)\n    time.sleep(5)\n    KFServing.get(serving_name,
+          namespace=namespace, watch=True, timeout_seconds=300)\n\nimport argparse\n_parser
+          = argparse.ArgumentParser(prog=''Kfserving'', description='''')\n_parser.add_argument(\"--namespace\",
+          dest=\"namespace\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--storage-uri\",
+          dest=\"storage_uri\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--serving-name\",
+          dest=\"serving_name\", type=str, required=True, default=argparse.SUPPRESS)\n_parsed_args
+          = vars(_parser.parse_args())\n\n_outputs = kfserving(**_parsed_args)\n"],
+          "image": "python:3.8-slim"}}, "inputs": [{"name": "namespace"}, {"name":
+          "storage_uri"}, {"name": "serving_name"}], "name": "Kfserving"}', pipelines.kubeflow.org/component_ref: '{}',
+        pipelines.kubeflow.org/arguments.parameters: '{"namespace": "{{inputs.parameters.namespace}}",
+          "serving_name": "{{inputs.parameters.name}}", "storage_uri": "pvc://{{inputs.parameters.pvc_name}}/saved_model"}'}
+  arguments:
+    parameters:
+    - {name: learning_rate}
+    - {name: dropout_rate}
+    - {name: epoch}
+    - {name: act}
+    - {name: layer}
+    - {name: checkpoint_dir}
+    - {name: saved_model_dir}
+    - {name: pvc_name}
+    - {name: tensorboard_log}
+    - {name: name}
+    - {name: model_version}
+    - {name: namespace}
+  serviceAccountName: pipeline-runner
