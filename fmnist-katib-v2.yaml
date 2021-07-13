@@ -41,10 +41,10 @@ spec:
     primaryContainerName: training-container
     trialParameters:
       - name: learningRate
-        description: Learning rate for the training model
+        description: Learning rate
         reference: lr
       - name: numberLayers
-        description: Number of training model layers
+        description: Number of model layers
         reference: num-layers
       - name: activationFunction
         description: Activation Function
@@ -63,10 +63,10 @@ spec:
           spec:
             containers:
               - name: training-container
-                image: kubeflow-registry.default.svc.cluster.local:30000/katib-job:3F6886A4
+                image: kubeflow-registry.default.svc.cluster.local:30000/katib-job:1F353073
                 command:
                   - python
-                  - /app/fmnist-save-model.py
+                  - /app/fmnist-training.py
                   - --learning_rate=${trialParameters.learningRate}
                   - --layer=${trialParameters.numberLayers}
                   - --act=${trialParameters.activationFunction}
